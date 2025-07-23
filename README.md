@@ -17,6 +17,8 @@ New functions for managing sources:
   - Example: `game.tempHpManager.removeSource(actor, "Rage")` removes all the temp hp attributed to Rage.
 - `game.tempHpManager.addToSource(actor, value, source)` adds the value to the actor as temp HP and associates the addition to an existing source. A negative value will subtract from the source and actor. If adding and the source does not exist, the source is created.
   - Example: `game.tempHpManager.addToSource(actor, 10, "Rage")` adds 10 to the existing Rage source or creates a new Rage source if it doesn't exist.
+ 
+<img width="175" height="73" alt="image" src="https://github.com/user-attachments/assets/0fdc339a-54c2-44e5-8fed-078044cd1216" />
 
 ## Donations
 
