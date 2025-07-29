@@ -34,6 +34,7 @@ Hooks.once('init', () => {
     game.tempHpManager.addTemp = addTemp;
     game.tempHpManager.removeSource = removeSource;
     game.tempHpManager.addToSource = addToSource;
+    game.tempHpManager.overrideSource = overrideSource;
 
     pf1.chat.enrichers.enrichers.push(...enricherConfig);
 })
