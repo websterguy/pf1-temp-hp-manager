@@ -31,6 +31,8 @@ New enrichers for use in chat and in descriptions:
   - Example: `@AddTemp[1d10 + @cl|source:False Life|override]{False Life}`
 - `@RemoveTemp[source]{Label}`
   - Removes a source of temp hp
+ 
+<img width="175" height="73" alt="image" src="https://github.com/user-attachments/assets/0fdc339a-54c2-44e5-8fed-078044cd1216" />
 
 ## Donations
 
