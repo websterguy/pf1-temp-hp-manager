@@ -34,6 +34,8 @@ Hooks.once('init', () => {
     game.tempHpManager.addTemp = addTemp;
     game.tempHpManager.removeSource = removeSource;
     game.tempHpManager.addToSource = addToSource;
+
+    pf1.chat.enrichers.enrichers.push(...enricherConfig);
 })
 
 /**
@@ -135,6 +137,28 @@ async function addToSource(actor, value, source) {
 }
 
 /**
+ * Overrides an amount of temp hp in a source to be the new passed value
+ * If adding and the source is not found, a new source is created
+ * 
+ * @param {actor} actor PC or NPC actor
+ * @param {number} value Value to add to temp hp (negative number subtracts)
+ * @param {string} source Name of the source of temp hp for tracking and display
+ */
+async function overrideSource(actor, value, source) {
+    value = Number(value);
+    if (Number.isNaN(value)) return console.warn('Tried to add a non-number to temp hp');
+    inUse = true;
+    let tempHpArray = actor.getFlag('pf1-temp-hp-manager', 'tempHp') ?? [];
+    let foundSource = tempHpArray.find(o => o.source === source);
+    if (!foundSource) addTemp(actor, value, source);
+    else {
+        await actor.addTempHP(value - foundSource.value);
+        foundSource.value = value;
+        await actor.setFlag('pf1-temp-hp-manager', 'tempHp', tempHpArray);
+    }
+}
+
+/**
  * Adds temp hp sources to the HP tooltip
  */
 Hooks.on('renderPF1ExtendedTooltip', (sheet, identifier, template) => {
@@ -156,3 +180,163 @@ Hooks.on('renderPF1ExtendedTooltip', (sheet, identifier, template) => {
         }
     }
 })
+
+/**
+ * Configures the enrichers, defining the regex, what handles the button creation, and what handles when clicked
+ */
+const enricherConfig = [
+    {
+        pattern: /@AddTemp\[(?<value>(?:[^[\]]|\[[^[\]]*])*?)(?:\|(?<options>.*?))?\](?:\{(?<label>.*?)})?/g,
+        enricher: addTempEnricher,
+        replaceParent: false,
+        id: 'addTemp',
+        click: addTempFromEnricher
+    },
+    {
+        pattern: /@RemoveTemp\[(?<source>.*?)?\](?:\{(?<label>.*?)})?/g,
+        enricher: removeTempEnricher,
+        replaceParent: false,
+        id: 'removeTemp',
+        click: removeTempFromEnricher
+    }
+]
+
+/**
+ * Adds temporary HP to all selected tokens in the way defined by the button
+ * 
+ * @param {Event} event the trigger
+ */
+async function addTempFromEnricher(event) {
+    const target = event.target;
+    const messageId = target.closest("[data-message-id]")?.dataset.messageId;
+    const message = game.messages.get(messageId);
+    let rollData;
+    if (message) rollData = getMessageRollData(message);
+    else {
+        const itemId = getItemFromSheet(target);
+        const targetDocument = !!itemId ? getSheet(target)?.document?.items?.get(itemId) : getSheet(target)?.document;
+        rollData = targetDocument?.getRollData() ?? {};
+    }
+
+    for (const token of canvas.tokens.controlled) {
+        const roll = await pf1.dice.RollPF.safeRoll(target.dataset.formula, target.dataset.rolldata === 'selected' ? token.actor.getRollData() : rollData);
+        const source = target.dataset.source;
+        if (!!source) {
+            if (!!target.dataset.override) overrideSource(token.actor, roll.total, source);
+            else addToSource(token.actor, roll.total, source);
+        }
+        else {
+            addTemp(token.actor, roll.total);
+        }
+    }
+}
+
+/**
+ * Removes a source of temp HP from all selected tokens
+ * 
+ * @param {Event} event the trigger
+ */
+async function removeTempFromEnricher(event) {
+    const target = event.target;
+    
+    for (const token of canvas.tokens.controlled) {
+        removeSource(token.actor, target.dataset.source);
+    }
+}
+
+/**
+ * Creates a button for the enricher.
+ * 
+ * @param {object} data 
+ * @returns {HTMLElement}
+ */
+async function addTempEnricher(data) {
+    const { value, options, label } = data.groups;
+    
+    const optionTokens = options?.split('|') ?? [];
+    const optionObject = {};
+    for (const token of optionTokens) {
+        const index = token.indexOf(':');
+        if (index < 0) continue;
+        else optionObject[token.trim().slice(0, index)] = token.trim().slice(index + 1);
+    }
+
+    const button = document.createElement('a');
+    button.classList.add('pf1-link', 'button');
+    button.dataset.handler = 'addTemp';
+    button.innerHTML = '<i class="far fa-heart"></i> ' + (!!label ? 'Temp ' + label : 'Add Temp HP ' + value);
+    button.dataset.formula = value;
+    let override = optionTokens.includes('override');
+    if (!!optionObject.source) button.dataset.source = optionObject.source;
+    if (!!optionObject.rolldata) button.dataset.rolldata = optionObject.rolldata;
+    if (override) button.dataset.override = "override";
+    button.dataset.tooltip = 'Add Temp: ' + value + (optionObject.source ? (override ? '<br>Overriding ' : '<br>As ') + optionObject.source : '');
+    return button;
+}
+
+/**
+ * Creates a button for the enricher.
+ * 
+ * @param {object} data 
+ * @returns {HTMLElement}
+ */
+async function removeTempEnricher(data) {
+    const { source, label } = data.groups;
+    
+    const button = document.createElement('a');
+    button.classList.add('pf1-link', 'button');
+    button.dataset.handler = 'removeTemp';
+    button.innerHTML = '<i class="far fa-heart"></i> ' + (!!label ? 'Temp ' + label : 'Remove Source ' + source);
+    button.dataset.source = source;
+
+    return button;
+}
+
+/**
+ * Compiles roll data from the passed message if available
+ * 
+ * @param {ChatMessage} message
+ * @returns 
+ */
+function getMessageRollData(message) {
+    let dataSource = message.actionSource ?? message.itemSource;
+    if (!dataSource && !!message.speaker) dataSource = ChatMessage.implementation.getSpeakerActor(message.speaker);
+    const rollData = dataSource?.getRollData() ?? {};
+
+    if (message.system?.config) {
+        const config = message.system.config;
+        if (!!config.cl) rollData.cl = config.cl;
+        if (!!config.sl) rollData.sl = config.sl;
+        if (!!config.critMult) rollData.critMult = config.critMult;
+    }
+
+    return rollData;
+}
+
+/**
+ * Gets the sheet the button is on
+ * 
+ * @param {Event} eventTarget The trigger
+ * @returns {Application} Foundry app
+ */
+function getSheet(eventTarget) {
+    const element = eventTarget.closest(".app[data-appid],.application");
+    let application;
+
+    if (!!element.id && !!foundry.applications.instances.get(element.id)) application = foundry.applications.instances.get(element.id);
+    else if (!!element.dataset.appId) application = ui.windows[element.dataset.appId];
+    else if (!!element.dataset.appid) application = ui.windows[element.dataset.appid];
+    return application;
+}
+
+/**
+ * Gets the id of item the button is on on the sheet
+ * 
+ * @param {Event} eventTarget The trigger
+ * @returns {Application} Foundry app
+ */
+function getItemFromSheet(eventTarget) {
+    const element = eventTarget.closest('li.item[data-item-id');
+
+    return element?.dataset.itemId;
+}
