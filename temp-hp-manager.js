@@ -1,27 +1,26 @@
-let inUse = false;
-
 /**
  * Monitor preUpdateActor for changes to temp hp to add to manager
  * Prevents temp hp from going below 0 
  */
 Hooks.on('preUpdateActor', async (actor, update, change) => {
-    if (inUse) return inUse = false;
-    let value = change.pf1?.deltas?.hp?.temp;
+    const vigor = getVigorSetting(actor);
+    let value = !vigor ? change.pf1?.deltas?.hp?.temp : change.pf1?.deltas?.vigor?.temp;
     if (!value) return;
+    const flagBeingSet = update.flags;
+    if (flagBeingSet && !!flagBeingSet['pf1-temp-hp-manager']) return;
     value = Number(value);
-    
-    if (Number.isNaN(value)) return await actor.unsetFlag('pf1-temp-hp-manager', 'tempHp');
-
-    if (-value > actor.system.attributes.hp.temp) {
-        update.system.attributes.hp.temp = 0;
-        value = -actor.system.attributes.hp.temp;
-    }
-    
-    if (value > 0) {
-        addSource(actor, value);
-    }
+    if (Number.isNaN(value)) update.flags['pf1-temp-hp-manager'].tempHp = [];
     else {
-        removeTemp(actor, value);
+        let curTHP = (vigor ? actor.system.attributes.vigor.temp : actor.system.attributes.hp.temp) || 0;
+
+        if (-value > curTHP) {
+            update.system.attributes[vigor ? 'vigor' : 'hp'].temp = 0;
+            value = -curTHP;
+        }
+        
+        const updateData = addTemp(actor, value, null, true);
+        update.flags = update.flags ?? {};
+        update.flags['pf1-temp-hp-manager'] = updateData.flags['pf1-temp-hp-manager'];
     }
 });
 
@@ -37,7 +36,20 @@ Hooks.once('init', () => {
     game.tempHpManager.overrideSource = overrideSource;
 
     pf1.chat.enrichers.enrichers.push(...enricherConfig);
+    libWrapper.register("pf1-temp-hp-manager", 'pf1.documents.actor.ActorPF.prototype.addTempHP', addTempHPWrapper, 'OVERRIDE');
 })
+
+async function addTempHPWrapper(value, { set = false } = {}) {
+    if (Number.isNaN(value)) return console.warn('Tried to add a non-number to temp hp');
+    const vigor = getVigorSetting(this);
+
+    if (set) {
+        const curTHP = (vigor ? this.system.attributes.vigor.temp : this.system.attributes.hp.temp) || 0;
+        value -= curTHP;
+    }
+
+    addTemp(this, value);
+}
 
 /**
  * Adds temp hp to the manager
@@ -45,19 +57,18 @@ Hooks.once('init', () => {
  * @param {actor} actor PC or NPC actor
  * @param {number} value Value to add to temp hp (negative number subtracts)
  * @param {string} source Name of the source of temp hp for tracking and display
+ * @param {boolean} giveReturn True means that the calling function expects to get return of the data for an update instead of running the update
+ * @returns {object} The data to be passed into an actor update
  */
-async function addTemp(actor, value, source = null) {
-    inUse = true;
+function addTemp(actor, value, source = null, giveReturn = false) {
     value = Number(value);
     if (Number.isNaN(value)) return console.warn('Tried to add a non-number to temp hp');
-    await actor.addTempHP(value);
     if (Number(value) > 0) {
-        addSource(actor, value, source);
+        return addSource(actor, value, source, giveReturn);
     }
     else {
-        removeTemp(actor, value);
+        return removeTemp(actor, value, giveReturn);
     }
-    inUse = false;
 }
 
 /**
@@ -66,13 +77,20 @@ async function addTemp(actor, value, source = null) {
  * @param {actor} actor PC or NPC actor
  * @param {number} value Value to add to temp hp (negative number subtracts)
  * @param {string} source Name of the source of temp hp for tracking and display
+ * @param {boolean} giveReturn True means that the calling function expects to get return of the data for an update instead of running the update
+ * @returns {object} The data to be passed into an actor update
  */
-async function addSource(actor, value, source) {
+function addSource(actor, value, source, giveReturn = false) {
     value = Number(value);
     if (Number.isNaN(value)) return console.warn('Tried to add a non-number to temp hp');
     let tempHpArray = actor.getFlag('pf1-temp-hp-manager', 'tempHp') ?? [];
     tempHpArray.push({value: value, source: source});
-    await actor.setFlag('pf1-temp-hp-manager', 'tempHp', tempHpArray);
+    const vigor = getVigorSetting(actor);
+    const curTHP = (vigor ? actor.system.attributes.vigor.temp : actor.system.attributes.hp.temp) || 0;
+    const update = { flags: { ['pf1-temp-hp-manager']: { tempHp: tempHpArray } }, system: { attributes: { [vigor ? "vigor" : "hp"]: { temp: curTHP + value } } } };
+
+    if (giveReturn) return update;
+    actor.update(update);
 }
 
 /**
@@ -80,39 +98,58 @@ async function addSource(actor, value, source) {
  * 
  * @param {actor} actor PC or NPC actor
  * @param {number} value Value to remove from temp hp (as a negative number)
+ * @param {boolean} giveReturn True means that the calling function expects to get return of the data for an update instead of running the update
+ * @returns {object} The data to be passed into an actor update
  */
-async function removeTemp(actor, value) {
+function removeTemp(actor, value, giveReturn = false) {
     value = Number(value);
     if (Number.isNaN(value)) return console.warn('Tried to add a non-number to temp hp');
+
+    const vigor = getVigorSetting(actor);
+    const curTHP = (vigor ? actor.system.attributes.vigor.temp : actor.system.attributes.hp.temp) || 0;
+    const newTHP = Math.max(curTHP + value, 0);
+
     let tempHpArray = actor.getFlag('pf1-temp-hp-manager', 'tempHp') ?? [];
-    while (value < 0) {
-        let firstAmount = tempHpArray[0]?.value;
-        value += firstAmount;
-        if (value <= 0) {
-            tempHpArray.splice(0, 1);
-        }
-        else {
-            tempHpArray[0].value = value;
-        }
+    let update;
+    if (newTHP === 0) {
+        update = { flags: { ['pf1-temp-hp-manager']: { tempHp: [] } }, system: { attributes: { [vigor ? "vigor" : "hp"]: { temp: newTHP } } } };
     }
-    actor.setFlag('pf1-temp-hp-manager', 'tempHp', tempHpArray);
+    else {
+        while (value < 0) {
+            let firstAmount = tempHpArray[0]?.value;
+            value += firstAmount;
+            if (value <= 0) {
+                tempHpArray.splice(0, 1);
+            }
+            else {
+                tempHpArray[0].value = value;
+            }
+        }
+        update = { flags: { ['pf1-temp-hp-manager']: { tempHp: tempHpArray } }, system: { attributes: { [vigor ? "vigor" : "hp"]: { temp: newTHP } } } };
+    }
+    
+    if (giveReturn) return update;
+    actor.update(update);
 }
 
 /**
  * Finds a specific source by name in the manager, removes it, and removes the temp hp from the actor
  * 
  * @param {actor} actor PC or NPC actor
- * @param {*} source The name of the source to remove from the manager
- * @returns 
+ * @param {string} source The name of the source to remove from the manager
+ * @param {boolean} giveReturn True means that the calling function expects to get return of the data for an update instead of running the update
+ * @returns {object} The data to be passed into an actor update
  */
-async function removeSource(actor, source) {
-    inUse = true;
+function removeSource(actor, source, giveReturn = false) {
     let tempHpArray = actor.getFlag('pf1-temp-hp-manager', 'tempHp') ?? [];
     let removed = tempHpArray.findSplice(o => o.source === source);
-    if (!removed) return console.warn(`Temp HP source "${source}" not found to be removed`);
-    await actor.addTempHP(-removed.value);
-    await actor.setFlag('pf1-temp-hp-manager', 'tempHp', tempHpArray);
-    inUse = false;
+    if (!removed) return {};
+    const vigor = getVigorSetting(actor);
+    const curTHP = (vigor ? actor.system.attributes.vigor.temp : actor.system.attributes.hp.temp) || 0;
+    const update = { flags: { ['pf1-temp-hp-manager']: { tempHp: tempHpArray } }, system: { attributes: { [vigor ? "vigor" : "hp"]: { temp: curTHP - removed.value } } } };
+
+    if (giveReturn) return update;
+    actor.update(update);
 }
 
 /**
@@ -122,18 +159,32 @@ async function removeSource(actor, source) {
  * @param {actor} actor PC or NPC actor
  * @param {number} value Value to add to temp hp (negative number subtracts)
  * @param {string} source Name of the source of temp hp for tracking and display
+ * @param {boolean} giveReturn True means that the calling function expects to get return of the data for an update instead of running the update
+ * @returns {object} The data to be passed into an actor update
  */
-async function addToSource(actor, value, source) {
+function addToSource(actor, value, source, giveReturn = false) {
     value = Number(value);
     if (Number.isNaN(value)) return console.warn('Tried to add a non-number to temp hp');
-    inUse = true;
     let tempHpArray = actor.getFlag('pf1-temp-hp-manager', 'tempHp') ?? [];
     let foundSource = tempHpArray.find(o => o.source === source);
-    if (!foundSource) addTemp(actor, value, source);
+    
+    const vigor = getVigorSetting(actor);
+    const curTHP = (vigor ? actor.system.attributes.vigor.temp : actor.system.attributes.hp.temp) || 0;
+    
+    if (!foundSource) {
+        if (value > 0) return addTemp(actor, value, source, giveReturn);
+    }
     else {
-        await actor.addTempHP(value);
+        if (value < 0 && (-value) >= foundSource.value) {
+            value = -foundSource.value;
+            tempHpArray.findSplice(o => o.source === source);
+        }
+
         foundSource.value += value;
-        await actor.setFlag('pf1-temp-hp-manager', 'tempHp', tempHpArray);
+        const update = { flags: { ['pf1-temp-hp-manager']: { tempHp: tempHpArray } }, system: { attributes: { [vigor ? "vigor" : "hp"]: { temp: curTHP + value } } } }
+
+        if (giveReturn) return update;
+        actor.update(update);
     }
 }
 
@@ -144,18 +195,27 @@ async function addToSource(actor, value, source) {
  * @param {actor} actor PC or NPC actor
  * @param {number} value Value to add to temp hp (negative number subtracts)
  * @param {string} source Name of the source of temp hp for tracking and display
+ * @param {boolean} giveReturn True means that the calling function expects to get return of the data for an update instead of running the update
+ * @returns {object} The data to be passed into an actor update
  */
-async function overrideSource(actor, value, source) {
+function overrideSource(actor, value, source, giveReturn = false) {
     value = Number(value);
     if (Number.isNaN(value)) return console.warn('Tried to add a non-number to temp hp');
-    inUse = true;
     let tempHpArray = actor.getFlag('pf1-temp-hp-manager', 'tempHp') ?? [];
     let foundSource = tempHpArray.find(o => o.source === source);
-    if (!foundSource) addTemp(actor, value, source);
+    if (!foundSource) return addTemp(actor, value, source, giveReturn);
     else {
-        await actor.addTempHP(value - foundSource.value);
-        foundSource.value = value;
-        await actor.setFlag('pf1-temp-hp-manager', 'tempHp', tempHpArray);
+        if (value <= 0) return removeSource(actor, source, giveReturn);
+        else {
+            const vigor = getVigorSetting(actor);
+            const curTHP = (vigor ? actor.system.attributes.vigor.temp : actor.system.attributes.hp.temp) || 0;
+            const newTHP = curTHP + value - foundSource.value;
+            foundSource.value = value;
+            const update = { flags: { ['pf1-temp-hp-manager']: { tempHp: tempHpArray } }, system: { attributes: { [vigor ? "vigor" : "hp"]: { temp: newTHP } } } };
+
+            if (giveReturn) return update;
+            actor.update(update);
+        }
     }
 }
 
@@ -163,7 +223,7 @@ async function overrideSource(actor, value, source) {
  * Adds temp hp sources to the HP tooltip
  */
 Hooks.on('renderPF1ExtendedTooltip', (sheet, identifier, template) => {
-    if (identifier === 'hit-points') {
+    if (identifier === 'hit-points' || identifier === 'vigor') {
         let tempHpArray = sheet.actor.getFlag('pf1-temp-hp-manager', 'tempHp') ?? [];
         if (tempHpArray.length === 0) return;
         const section = document.createElement('h4');
@@ -219,17 +279,34 @@ async function addTempFromEnricher(event) {
         rollData = targetDocument?.getRollData() ?? {};
     }
 
+    const updates = [];
+
     for (const token of canvas.tokens.controlled) {
+        let update;
         const roll = await pf1.dice.RollPF.safeRoll(target.dataset.formula, target.dataset.rolldata === 'selected' ? token.actor.getRollData() : rollData);
         const source = target.dataset.source;
+
         if (!!source) {
-            if (!!target.dataset.override) overrideSource(token.actor, roll.total, source);
-            else addToSource(token.actor, roll.total, source);
+            if (!!target.dataset.override) {
+
+                update = overrideSource(token.actor, roll.total, source, true);
+            }
+            else {
+                update = addToSource(token.actor, roll.total, source, true);
+            }
         }
         else {
-            addTemp(token.actor, roll.total);
+            update = addTemp(token.actor, roll.total, null, true);
         }
+
+        if (!update) continue;
+        if (token.document.isLinked) {
+            update._id = token.actor.id;
+            updates.push(update);
+        }
+        else token.actor.update(update);
     }
+    Actor.implementation.updateDocuments(updates);
 }
 
 /**
@@ -239,10 +316,21 @@ async function addTempFromEnricher(event) {
  */
 async function removeTempFromEnricher(event) {
     const target = event.target;
+
+    const updates = [];
     
     for (const token of canvas.tokens.controlled) {
-        removeSource(token.actor, target.dataset.source);
+        const update = removeSource(token.actor, target.dataset.source, true);
+        
+        if (!update) continue;
+        if (token.document.isLinked) {
+            update._id = token.actor.id;
+            updates.push(update);
+        }
+        else token.actor.update(update);
     }
+
+    Actor.implementation.updateDocuments(updates);
 }
 
 /**
@@ -340,4 +428,10 @@ function getItemFromSheet(eventTarget) {
     const element = eventTarget.closest('li.item[data-item-id');
 
     return element?.dataset.itemId;
+}
+
+function getVigorSetting(actor) {
+    const healthConfig = game.settings.get("pf1", "healthConfig");
+    const hpActorConfig = healthConfig.getActorConfig(actor);
+    return hpActorConfig.rules.useWoundsAndVigor;
 }
