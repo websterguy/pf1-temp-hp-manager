@@ -16,6 +16,13 @@
     }
   ],
   "relationships": {
+    "requires": [
+      {
+        "id": "lib-wrapper",
+        "type": "module",
+        "compatibility": {}
+      }
+    ],
     "systems": [
       {
         "id": "pf1",
